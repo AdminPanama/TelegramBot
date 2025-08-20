@@ -24,6 +24,19 @@ PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
 MIN_STARS = 50
 MAX_STARS = 10000
 
+# === Фразы для шутливого режима ===
+JOKES = [
+    "🚫 Нет денег — нет конфетки 🍭",
+    "🤗 Всё ещё впереди! Иди работай 💼",
+    "🥲 Халявы нет, брат… только работа и TON 💎",
+    "🐒 Обезьяна тоже хотела бесплатно, но пошла бананы собирать 🍌",
+    "🕺 Звёзды без денег? Это не астрономия, дружище 🌌",
+    "😎 Работай, плати — получай звёзды. Всё просто 🚀",
+    "🏚️ В кредит звёзды не выдаём, сорри 💳",
+    "🤡 Ага, щас! Бесплатно только сыр… и то в мышеловке 🧀",
+    "🧘 Терпение, молодец. Денег нет — значит время копить 🙏",
+    "🪙 TON не растут на деревьях, их майнят 💻"
+]
 
 # === Генерация ID заявки ===
 def generate_tx_id():
@@ -66,27 +79,22 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text)
 
     elif query.data == "fake_buy":
-        phrases = [
-            "🚫 Нет денег — нет конфетки 🍭",
-            "🤗 Всё ещё впереди! Иди работай 💼"
-        ]
+        joke = random.choice(JOKES)
         keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
         await query.message.reply_text(
-            random.choice(phrases),
+            joke,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif query.data.startswith("confirm_"):
         tx_id = query.data.split("_")[1]
 
-        # Найдём пользователя и обновим историю
         for user_id, data in context.application.user_data.items():
             if isinstance(data, dict) and "history" in data:
                 for i, record in enumerate(data["history"]):
                     if f"#{tx_id}" in record and "⏳" in record:
                         data["history"][i] = record.replace("⏳ ожидает подтверждения", "✅ подтверждено")
 
-                        # Сообщение юзеру
                         keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
                         await context.bot.send_message(
                             chat_id=user_id,
@@ -106,7 +114,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if f"#{tx_id}" in record and "⏳" in record:
                         data["history"][i] = record.replace("⏳ ожидает подтверждения", "❌ отклонено")
 
-                        # Сообщение юзеру
                         keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
                         await context.bot.send_message(
                             chat_id=user_id,
@@ -138,7 +145,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Максимум {MAX_STARS}⭐")
                 return
 
-            price = amount * PRICE_PER_STAR  # цена в TON
+            price = amount * PRICE_PER_STAR
 
             await update.message.reply_text(
                 f"💳 За {amount}⭐ нужно оплатить <b>{price:.4f} TON</b>\n\n"
@@ -148,7 +155,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
-            # 🔥 ВАЖНОЕ СООБЩЕНИЕ
             await update.message.reply_text(
                 "⚠️ ВАЖНО!\n\n"
                 "После оплаты отправьте сюда:\n"
@@ -172,7 +178,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     amount = context.user_data.get("last_amount", "❓")
 
-    # Генерируем ID заявки
     tx_id = generate_tx_id()
 
     caption = (
@@ -183,19 +188,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Статус: ожидает подтверждения"
     )
 
-    # Сохраняем в историю
     if "history" not in context.user_data:
         context.user_data["history"] = []
     context.user_data["history"].append(f"[Заявка #{tx_id}] {amount}⭐ — ⏳ ожидает подтверждения")
 
-    # Отправка админу
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{tx_id}"),
         InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{tx_id}")
     ]])
     await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo, caption=caption, reply_markup=keyboard)
 
-    # Сообщение пользователю
     await update.message.reply_text(
         f"💰 Оплата получена! ✅\nВаша заявка #{tx_id} зарегистрирована.\nОжидайте проверки администратора."
     )
