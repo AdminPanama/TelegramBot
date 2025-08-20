@@ -228,12 +228,32 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# === Общие купленные звёзды (только для админа) ===
+async def stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    total_stars = 0
+    for data in context.application.user_data.values():
+        if isinstance(data, dict) and "history" in data:
+            for record in data["history"]:
+                if "✅ подтверждено" in record:
+                    try:
+                        stars_amount = int(record.split("⭐")[0].split()[-1])
+                        total_stars += stars_amount
+                    except Exception:
+                        pass
+
+    await update.message.reply_text(f"🌟 Всего куплено звёзд: {total_stars}")
+
+
 # === Основная функция ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))  # только для админа
+    app.add_handler(CommandHandler("stars", stars))  # только для админа
     app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
