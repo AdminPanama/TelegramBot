@@ -1,4 +1,6 @@
 import os
+import random
+import string
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -23,11 +25,17 @@ MIN_STARS = 50
 MAX_STARS = 10000
 
 
+# === Генерация ID заявки ===
+def generate_tx_id():
+    return ''.join(random.choices(string.digits, k=6))  # например: 384920
+
+
 # === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
-        [InlineKeyboardButton("📜 История покупок", callback_data="history")]
+        [InlineKeyboardButton("📜 История покупок", callback_data="history")],
+        [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
     ]
     await update.message.reply_text(
         "👋 Добро пожаловать! Выберите действие:",
@@ -57,58 +65,63 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📜 Ваша история покупок пока пуста."
         await query.message.reply_text(text)
 
+    elif query.data == "fake_buy":
+        phrases = [
+            "🚫 Нет денег — нет конфетки 🍭",
+            "🤗 Всё ещё впереди! Иди работай 💼"
+        ]
+        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+        await query.message.reply_text(
+            random.choice(phrases),
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
     elif query.data.startswith("confirm_"):
-        user_id = int(query.data.split("_")[1])
-        amount = query.data.split("_")[2]
+        tx_id = query.data.split("_")[1]
 
-        if "history" in context.application.user_data.get(user_id, {}):
-            history = context.application.user_data[user_id]["history"]
-            for i in range(len(history)):
-                if history[i].startswith(f"{amount}⭐ — ⏳"):
-                    history[i] = f"{amount}⭐ — ✅ подтверждено"
+        # Найдём пользователя и обновим историю
+        for user_id, data in context.application.user_data.items():
+            if isinstance(data, dict) and "history" in data:
+                for i, record in enumerate(data["history"]):
+                    if f"#{tx_id}" in record and "⏳" in record:
+                        data["history"][i] = record.replace("⏳ ожидает подтверждения", "✅ подтверждено")
 
-        await query.message.reply_text(f"✅ Оплата пользователя {user_id} подтверждена!")
+                        # Сообщение юзеру
+                        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"✅ Ваша заявка #{tx_id} подтверждена!\nЗвёзды скоро будут начислены 🎉",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
 
-        try:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
-            )
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ Ваша оплата {amount}⭐ подтверждена!\nЗвёзды скоро будут начислены 🎉",
-                reply_markup=keyboard
-            )
-        except:
-            pass
+                        await query.message.reply_text(f"✅ Оплата по заявке #{tx_id} подтверждена!")
+                        return
 
     elif query.data.startswith("reject_"):
-        user_id = int(query.data.split("_")[1])
-        amount = query.data.split("_")[2]
+        tx_id = query.data.split("_")[1]
 
-        if "history" in context.application.user_data.get(user_id, {}):
-            history = context.application.user_data[user_id]["history"]
-            for i in range(len(history)):
-                if history[i].startswith(f"{amount}⭐ — ⏳"):
-                    history[i] = f"{amount}⭐ — ❌ отклонено"
+        for user_id, data in context.application.user_data.items():
+            if isinstance(data, dict) and "history" in data:
+                for i, record in enumerate(data["history"]):
+                    if f"#{tx_id}" in record and "⏳" in record:
+                        data["history"][i] = record.replace("⏳ ожидает подтверждения", "❌ отклонено")
 
-        await query.message.reply_text(f"❌ Оплата пользователя {user_id} отклонена!")
+                        # Сообщение юзеру
+                        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"❌ Ваша заявка #{tx_id} была отклонена.\nЕсли это ошибка — свяжитесь с поддержкой.",
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
 
-        try:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
-            )
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ Ваша оплата {amount}⭐ была отклонена.\nЕсли это ошибка — свяжитесь с поддержкой.",
-                reply_markup=keyboard
-            )
-        except:
-            pass
+                        await query.message.reply_text(f"❌ Оплата по заявке #{tx_id} отклонена!")
+                        return
 
     elif query.data == "main_menu":
         keyboard = [
             [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
-            [InlineKeyboardButton("📜 История покупок", callback_data="history")]
+            [InlineKeyboardButton("📜 История покупок", callback_data="history")],
+            [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
         ]
         await query.message.reply_text("🏠 Главное меню:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -128,11 +141,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = amount * PRICE_PER_STAR  # цена в TON
 
             await update.message.reply_text(
-                f"💳 За {amount}⭐ нужно оплатить **{price:.4f} TON**\n\n"
-                f"Перевод отправляй на кошелек:\n`{TON_WALLET}`\n\n"
+                f"💳 За {amount}⭐ нужно оплатить <b>{price:.4f} TON</b>\n\n"
+                f"Перевод отправляй на кошелек:\n<code>{TON_WALLET}</code>\n\n"
                 "⚠️ Звезды приходят до 2-х часов (обычно в течение 15 минут).\n"
                 "Если не пришли — напиши в поддержку.",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
 
             # 🔥 ВАЖНОЕ СООБЩЕНИЕ
@@ -145,7 +158,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             context.user_data["waiting_for_stars"] = False
-            context.user_data["last_amount"] = amount  # сохраняем для админа
+            context.user_data["last_amount"] = amount
 
         except ValueError:
             await update.message.reply_text("❌ Введите корректное число.")
@@ -154,30 +167,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === Получение скриншота оплаты ===
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1].file_id
-    username = update.message.from_user.username or update.message.from_user.id
-    user_id = update.message.from_user.id
+    user = update.message.from_user
+    username = f"@{user.username}" if user.username else f"ID:{user.id}"
+    user_id = user.id
     amount = context.user_data.get("last_amount", "❓")
 
+    # Генерируем ID заявки
+    tx_id = generate_tx_id()
+
     caption = (
-        f"📸 Скриншот оплаты\n"
-        f"👤 Пользователь: @{username}\n"
-        f"⭐ Оплатил: {amount} звёзд"
+        f"💰 Новая оплата!\n"
+        f"📌 Заявка: #{tx_id}\n"
+        f"👤 Пользователь: {username}\n"
+        f"⭐ Оплатил: {amount} звёзд\n"
+        f"⏳ Статус: ожидает подтверждения"
     )
 
-    # Сохраняем покупку в историю
+    # Сохраняем в историю
     if "history" not in context.user_data:
         context.user_data["history"] = []
-    context.user_data["history"].append(f"{amount}⭐ — ⏳ ожидает подтверждения")
+    context.user_data["history"].append(f"[Заявка #{tx_id}] {amount}⭐ — ⏳ ожидает подтверждения")
 
-    # Отправка админу с кнопками подтверждения/отклонения
+    # Отправка админу
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}_{amount}"),
-        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}_{amount}")
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{tx_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{tx_id}")
     ]])
     await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo, caption=caption, reply_markup=keyboard)
 
-    # Подтверждение пользователю
-    await update.message.reply_text("💰 Оплата получена! ✅\nОжидайте проверки администратора.")
+    # Сообщение пользователю
+    await update.message.reply_text(
+        f"💰 Оплата получена! ✅\nВаша заявка #{tx_id} зарегистрирована.\nОжидайте проверки администратора."
+    )
 
 
 # === Если не фото ===
