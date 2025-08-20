@@ -75,7 +75,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
+            # 🔥 ВАЖНОЕ СООБЩЕНИЕ
+            await update.message.reply_text(
+                "⚠️ ВАЖНО!\n\n"
+                "После оплаты отправьте сюда:\n"
+                "1️⃣ Скриншот перевода\n"
+                "2️⃣ Ваш @юзернейм\n"
+                "3️⃣ Количество ⭐ звёзд, которые вы оплатили"
+            )
+
             context.user_data["waiting_for_stars"] = False
+            context.user_data["last_amount"] = amount  # сохраняем для админа
 
         except ValueError:
             await update.message.reply_text("❌ Введите корректное число.")
@@ -84,8 +94,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === Получение скриншота оплаты ===
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1].file_id
+    username = update.message.from_user.username or update.message.from_user.id
+    amount = context.user_data.get("last_amount", "❓")
+
     caption = (
-        f"📸 Скриншот оплаты от @{update.message.from_user.username or update.message.from_user.id}"
+        f"📸 Скриншот оплаты\n"
+        f"👤 Пользователь: @{username}\n"
+        f"⭐ Оплатил: {amount} звёзд"
     )
 
     # Отправка админу
