@@ -1,7 +1,6 @@
 import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from datetime import datetime
 
 # ====================
 # Настройки из Render Environment
@@ -36,30 +35,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# === Команда админа для общей истории ===
-async def all_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    all_purchases = context.application.bot_data.get("all_purchases", [])
-    if not all_purchases:
-        await update.message.reply_text("📜 Общая история пуста.")
-        return
-
-    total_confirmed = 0
-    text_lines = []
-    for entry in all_purchases:
-        line = f"{entry['date']} | @{entry['username']} | {entry['amount']}⭐ — {entry['status']}"
-        text_lines.append(line)
-        if entry["status"] == "✅ подтверждено":
-            total_confirmed += entry["amount"]
-
-    text = "📜 Общая история покупок:\n\n" + "\n".join(text_lines)
-    text += f"\n\n🌟 Всего подтверждено: {total_confirmed}⭐"
-
-    await update.message.reply_text(text)
-
-
 # === Кнопки меню и обработка админских действий ===
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -84,7 +59,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("confirm_"):
         user_id = int(query.data.split("_")[1])
-        amount = int(query.data.split("_")[2])
+        amount = query.data.split("_")[2]
 
         if "history" in context.application.user_data.get(user_id, {}):
             history = context.application.user_data[user_id]["history"]
@@ -92,25 +67,23 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if history[i].startswith(f"{amount}⭐ — ⏳"):
                     history[i] = f"{amount}⭐ — ✅ подтверждено"
 
-        # обновляем в общей истории
-        all_purchases = context.application.bot_data.get("all_purchases", [])
-        for entry in all_purchases:
-            if entry["user_id"] == user_id and entry["amount"] == amount and entry["status"] == "⏳ ожидает подтверждения":
-                entry["status"] = "✅ подтверждено"
-
         await query.message.reply_text(f"✅ Оплата пользователя {user_id} подтверждена!")
 
         try:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+            )
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"✅ Ваша оплата {amount}⭐ подтверждена!\nЗвёзды скоро будут начислены 🎉"
+                text=f"✅ Ваша оплата {amount}⭐ подтверждена!\nЗвёзды скоро будут начислены 🎉",
+                reply_markup=keyboard
             )
         except:
             pass
 
     elif query.data.startswith("reject_"):
         user_id = int(query.data.split("_")[1])
-        amount = int(query.data.split("_")[2])
+        amount = query.data.split("_")[2]
 
         if "history" in context.application.user_data.get(user_id, {}):
             history = context.application.user_data[user_id]["history"]
@@ -118,21 +91,26 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if history[i].startswith(f"{amount}⭐ — ⏳"):
                     history[i] = f"{amount}⭐ — ❌ отклонено"
 
-        # обновляем в общей истории
-        all_purchases = context.application.bot_data.get("all_purchases", [])
-        for entry in all_purchases:
-            if entry["user_id"] == user_id and entry["amount"] == amount and entry["status"] == "⏳ ожидает подтверждения":
-                entry["status"] = "❌ отклонено"
-
         await query.message.reply_text(f"❌ Оплата пользователя {user_id} отклонена!")
 
         try:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+            )
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"❌ Ваша оплата {amount}⭐ была отклонена.\nЕсли это ошибка — свяжитесь с поддержкой."
+                text=f"❌ Ваша оплата {amount}⭐ была отклонена.\nЕсли это ошибка — свяжитесь с поддержкой.",
+                reply_markup=keyboard
             )
         except:
             pass
+
+    elif query.data == "main_menu":
+        keyboard = [
+            [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
+            [InlineKeyboardButton("📜 История покупок", callback_data="history")]
+        ]
+        await query.message.reply_text("🏠 Главное меню:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # === Ввод количества звёзд ===
@@ -180,32 +158,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     amount = context.user_data.get("last_amount", "❓")
 
-    date = datetime.now().strftime("%Y-%m-%d %H:%M")
-
     caption = (
         f"📸 Скриншот оплаты\n"
         f"👤 Пользователь: @{username}\n"
-        f"⭐ Оплатил: {amount} звёзд\n"
-        f"📅 Дата: {date}"
+        f"⭐ Оплатил: {amount} звёзд"
     )
 
-    # Сохраняем покупку в личную историю
+    # Сохраняем покупку в историю
     if "history" not in context.user_data:
         context.user_data["history"] = []
     context.user_data["history"].append(f"{amount}⭐ — ⏳ ожидает подтверждения")
 
-    # Сохраняем в общую историю
-    if "all_purchases" not in context.application.bot_data:
-        context.application.bot_data["all_purchases"] = []
-    context.application.bot_data["all_purchases"].append({
-        "user_id": user_id,
-        "username": username,
-        "amount": amount,
-        "status": "⏳ ожидает подтверждения",
-        "date": date
-    })
-
-    # Отправка админу с кнопками
+    # Отправка админу с кнопками подтверждения/отклонения
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}_{amount}"),
         InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}_{amount}")
@@ -227,7 +191,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("all_history", all_history))  # 👈 команда для админа
     app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
