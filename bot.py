@@ -24,19 +24,10 @@ PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
 MIN_STARS = 50
 MAX_STARS = 10000
 
-# === Фразы для шутливого режима ===
-JOKES = [
-    "🚫 Нет денег — нет конфетки 🍭",
-    "🤗 Всё ещё впереди! Иди работай 💼",
-    "🥲 Халявы нет, брат… только работа и TON 💎",
-    "🐒 Обезьяна тоже хотела бесплатно, но пошла бананы собирать 🍌",
-    "🕺 Звёзды без денег? Это не астрономия, дружище 🌌",
-    "😎 Работай, плати — получай звёзды. Всё просто 🚀",
-    "🏚️ В кредит звёзды не выдаём, сорри 💳",
-    "🤡 Ага, щас! Бесплатно только сыр… и то в мышеловке 🧀",
-    "🧘 Терпение, молодец. Денег нет — значит время копить 🙏",
-    "🪙 TON не растут на деревьях, их майнят 💻"
-]
+# Хранение статистики
+USERS = set()   # уникальные пользователи
+TOTAL_ORDERS = 0  # кол-во заявок всего
+
 
 # === Генерация ID заявки ===
 def generate_tx_id():
@@ -45,6 +36,9 @@ def generate_tx_id():
 
 # === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    USERS.add(user_id)  # сохраняем юзера
+
     keyboard = [
         [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
         [InlineKeyboardButton("📜 История покупок", callback_data="history")],
@@ -79,10 +73,21 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text)
 
     elif query.data == "fake_buy":
-        joke = random.choice(JOKES)
+        phrases = [
+            "🚫 Нет денег — нет конфетки 🍭",
+            "🤗 Всё ещё впереди! Иди работай 💼",
+            "🥲 Халявы нет, брат… только работа и TON 💎",
+            "🐒 Обезьяна тоже хотела бесплатно, но пошла бананы собирать 🍌",
+            "🕺 Звёзды без денег? Это не астрономия, дружище 🌌",
+            "😎 Работай, плати — получай звёзды. Всё просто 🚀",
+            "🏚️ В кредит звёзды не выдаём, сорри 💳",
+            "🤡 Ага, щас! Бесплатно только сыр… и то в мышеловке 🧀",
+            "🧘 Терпение, молодец. Денег нет — значит время копить 🙏",
+            "🪙 TON не растут на деревьях, их майнят 💻"
+        ]
         keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
         await query.message.reply_text(
-            joke,
+            random.choice(phrases),
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -146,7 +151,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             price = amount * PRICE_PER_STAR
-
             await update.message.reply_text(
                 f"💳 За {amount}⭐ нужно оплатить <b>{price:.4f} TON</b>\n\n"
                 f"Перевод отправляй на кошелек:\n<code>{TON_WALLET}</code>\n\n"
@@ -172,6 +176,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === Получение скриншота оплаты ===
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global TOTAL_ORDERS
+    TOTAL_ORDERS += 1  # увеличиваем счётчик заявок
+
     photo = update.message.photo[-1].file_id
     user = update.message.from_user
     username = f"@{user.username}" if user.username else f"ID:{user.id}"
@@ -209,11 +216,24 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Пожалуйста, отправь скриншот оплаты или выбери действие в меню.")
 
 
+# === Статистика (только для админа) ===
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    await update.message.reply_text(
+        f"📊 Статистика:\n\n"
+        f"👥 Уникальных пользователей: {len(USERS)}\n"
+        f"📝 Всего заявок: {TOTAL_ORDERS}"
+    )
+
+
 # === Основная функция ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))  # только для админа
     app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
