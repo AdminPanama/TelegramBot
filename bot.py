@@ -37,48 +37,39 @@ TOTAL_ORDERS = 0
 def generate_tx_id():
     return ''.join(random.choices(string.digits, k=6))
 
-# === Проверка подписки ===
-async def is_subscribed(bot, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except Exception:
-        return False
-
 # === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     USERS.add(user_id)
 
     keyboard = [
+        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
+        [InlineKeyboardButton("✅ Продолжить", callback_data="continue_menu")]
+    ]
+    await update.message.reply_text(
+        f"👋 Добро пожаловать!\n\n"
+        f"Чтобы пользоваться ботом, подпишитесь на наш канал 👉 @{CHANNEL_USERNAME}\n"
+        f"После этого нажмите «Продолжить».",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# === Главное меню ===
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
         [InlineKeyboardButton("📜 История покупок", callback_data="history")],
         [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
-    ]
-    await update.message.reply_text(
-        "👋 Добро пожаловать! Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    ])
 
 # === Обработка меню ===
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "buy_stars":
-        subscribed = await is_subscribed(context.bot, query.from_user.id)
-        if not subscribed:
-            keyboard = [
-                [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
-                [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
-            ]
-            await query.message.reply_text(
-                "❌ Чтобы купить звёзды, нужно быть подписанным на канал.\n\n"
-                f"👉 Подпишитесь на {CHANNEL_USERNAME}, затем нажмите «Проверить подписку».",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
+    if query.data == "continue_menu":
+        await query.message.reply_text("🏠 Главное меню:", reply_markup=main_menu_keyboard())
 
+    elif query.data == "buy_stars":
         await query.message.reply_text(
             f"⭐ Минимальное количество: {MIN_STARS}\n"
             f"⭐ Максимальное количество: {MAX_STARS}\n"
@@ -86,22 +77,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Введите количество звёзд, которое хотите купить:"
         )
         context.user_data["waiting_for_stars"] = True
-
-    elif query.data == "check_sub":
-        subscribed = await is_subscribed(context.bot, query.from_user.id)
-        if subscribed:
-            await query.message.reply_text("✅ Подписка подтверждена! Теперь можете купить звёзды.")
-            # запускаем покупку снова
-            await menu_handler(Update(update.update_id, message=query.message), context)
-        else:
-            keyboard = [
-                [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
-                [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
-            ]
-            await query.message.reply_text(
-                f"❌ Вы всё ещё не подписаны на @{CHANNEL_USERNAME}",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
 
     elif query.data == "history":
         history = context.user_data.get("history", [])
@@ -124,16 +99,8 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧘 Терпение, молодец. Денег нет — значит время копить 🙏",
             "🪙 TON не растут на деревьях, их майнят 💻"
         ]
-        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="main_menu")]]
+        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="continue_menu")]]
         await query.message.reply_text(random.choice(phrases), reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif query.data == "main_menu":
-        keyboard = [
-            [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
-            [InlineKeyboardButton("📜 История покупок", callback_data="history")],
-            [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
-        ]
-        await query.message.reply_text("🏠 Главное меню:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # === Обработка текста (ввод кол-ва звёзд) ===
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,8 +221,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(CallbackQueryHandler(admin_handler, pattern="^(confirm_|reject_)"))
+    app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
