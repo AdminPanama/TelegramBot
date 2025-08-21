@@ -68,9 +68,13 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "buy_stars":
         subscribed = await is_subscribed(context.bot, query.from_user.id)
         if not subscribed:
-            keyboard = [[InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]]
+            keyboard = [
+                [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
+                [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
+            ]
             await query.message.reply_text(
-                f"❌ Чтобы купить звёзды, подпишитесь на наш канал @{CHANNEL_USERNAME} и нажмите «Проверить подписку».",
+                "❌ Чтобы купить звёзды, нужно быть подписанным на канал.\n\n"
+                f"👉 Подпишитесь на @{CHANNEL_USERNAME}, затем нажмите «Проверить подписку».",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
@@ -88,9 +92,16 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if subscribed:
             await query.message.reply_text("✅ Подписка подтверждена! Теперь можете купить звёзды.")
             # запускаем покупку снова
-            await menu_handler(update, context)
+            await menu_handler(Update(update.update_id, message=query.message), context)
         else:
-            await query.message.reply_text(f"❌ Вы всё ещё не подписаны на @{CHANNEL_USERNAME}")
+            keyboard = [
+                [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
+                [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
+            ]
+            await query.message.reply_text(
+                f"❌ Вы всё ещё не подписаны на @{CHANNEL_USERNAME}",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
     elif query.data == "history":
         history = context.user_data.get("history", [])
