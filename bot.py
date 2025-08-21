@@ -74,7 +74,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             await query.message.reply_text(
                 "❌ Чтобы купить звёзды, нужно быть подписанным на канал.\n\n"
-                f"👉 Подпишитесь на @{CHANNEL_USERNAME}, затем нажмите «Проверить подписку».",
+                f"👉 Подпишитесь на {CHANNEL_USERNAME}, затем нажмите «Проверить подписку».",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
