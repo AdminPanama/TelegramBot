@@ -1,342 +1,269 @@
 import os
-import random
-import string
-import asyncpg
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import logging
+import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
 )
 
-# ====================
-# Настройки из Render Environment
+# ==================== #
+# Логирование
+# ==================== #
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ==================== #
+# Настройки
+# ==================== #
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
-TON_WALLET = os.getenv("TON_WALLET")
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # имя канала без @
-DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не задан в переменных окружения")
-if not ADMIN_ID:
-    raise ValueError("❌ ADMIN_ID не задан в переменных окружения")
-if not TON_WALLET:
-    raise ValueError("❌ TON_WALLET не задан в переменных окружения")
-if not CHANNEL_USERNAME:
-    raise ValueError("❌ CHANNEL_USERNAME не задан в переменных окружения")
-if not DATABASE_URL:
-    raise ValueError("❌ DATABASE_URL не задан в переменных окружения")
+DB_PATH = "bot.db"
+REF_PERCENT = 0.01  # 1% бонус от покупок рефералов
 
-ADMIN_ID = int(ADMIN_ID)
-# ====================
+# ==================== #
+# Работа с БД
+# ==================== #
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
-MIN_STARS = 50
-MAX_STARS = 10000
-REF_BONUS = 10  # бонус за приглашенного
-
-
-# === БД ===
-async def init_db():
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        telegram_id BIGINT UNIQUE,
+    # пользователи
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
         username TEXT,
-        invited_by BIGINT,
-        balance INT DEFAULT 0,
-        total_ref_earned INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW()
-    );
-    """)
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS orders (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        stars INT,
-        amount NUMERIC,
-        status TEXT,
-        created_at TIMESTAMP DEFAULT NOW()
-    );
-    """)
-    await conn.close()
+        balance REAL DEFAULT 0,
+        invited_by INTEGER,
+        ref_balance REAL DEFAULT 0,
+        total_ref_earned REAL DEFAULT 0
+    )""")
 
+    # заказы
+    c.execute("""CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        status TEXT
+    )""")
 
-async def get_user(telegram_id):
-    conn = await asyncpg.connect(DATABASE_URL)
-    user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
-    await conn.close()
-    return user
+    conn.commit()
+    conn.close()
 
+def add_user(user_id, username, invited_by=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE id=?", (user_id,))
+    if not c.fetchone():
+        c.execute("INSERT INTO users (id, username, invited_by) VALUES (?, ?, ?)",
+                  (user_id, username, invited_by))
+    conn.commit()
+    conn.close()
 
-async def add_user(telegram_id, username, invited_by=None):
-    conn = await asyncpg.connect(DATABASE_URL)
-    user = await conn.fetchrow("SELECT * FROM users WHERE telegram_id=$1", telegram_id)
-    if not user:
-        await conn.execute(
-            "INSERT INTO users (telegram_id, username, invited_by) VALUES ($1,$2,$3)",
-            telegram_id, username, invited_by
-        )
-    await conn.close()
-
-
-async def add_order(user_id, stars, amount, status="Ожидает подтверждения"):
-    conn = await asyncpg.connect(DATABASE_URL)
-    row = await conn.fetchrow(
-        "INSERT INTO orders (user_id, stars, amount, status) VALUES ($1,$2,$3,$4) RETURNING id",
-        user_id, stars, amount, status
-    )
-    await conn.close()
-    return row["id"]
-
-
-async def update_order_status(order_id, status):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("UPDATE orders SET status=$1 WHERE id=$2", status, order_id)
-    await conn.close()
-
-
-async def add_bonus(inviter_id, bonus=REF_BONUS):
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "UPDATE users SET balance = balance + $1, total_ref_earned = total_ref_earned + $1 WHERE telegram_id=$2",
-        bonus, inviter_id
-    )
-    await conn.close()
-
-
-async def get_balance_refstats_invites(user_id):
-    conn = await asyncpg.connect(DATABASE_URL)
-    row = await conn.fetchrow("SELECT balance, total_ref_earned FROM users WHERE telegram_id=$1", user_id)
-    invites = await conn.fetchval("SELECT COUNT(*) FROM users WHERE invited_by=$1", user_id)
-    await conn.close()
+def get_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
     if row:
-        return row["balance"], row["total_ref_earned"], invites
-    return 0, 0, 0
+        return {
+            "id": row[0],
+            "username": row[1],
+            "balance": row[2],
+            "invited_by": row[3],
+            "ref_balance": row[4],
+            "total_ref_earned": row[5]
+        }
+    return None
 
+def update_balance(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + ? WHERE id=?", (amount, user_id))
+    conn.commit()
+    conn.close()
 
-# === Команда /start ===
+def add_ref_bonus(user_id, bonus):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""UPDATE users 
+                 SET ref_balance = ref_balance + ?, 
+                     total_ref_earned = total_ref_earned + ? 
+                 WHERE id=?""", (bonus, bonus, user_id))
+    conn.commit()
+    conn.close()
+
+def add_order(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO orders (user_id, amount, status) VALUES (?, ?, ?)",
+              (user_id, amount, "⏳ Ожидание"))
+    conn.commit()
+    conn.close()
+    return c.lastrowid
+
+def update_order_status(order_id, status):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
+    conn.commit()
+    conn.close()
+
+# ==================== #
+# Команды
+# ==================== #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-
+    user = update.effective_user
     ref_id = None
+
+    # проверяем, есть ли рефка
     if context.args:
         try:
             ref_id = int(context.args[0])
-        except:
+        except ValueError:
             pass
 
-    await add_user(user_id, username, ref_id)
+    add_user(user.id, user.username, ref_id)
 
     keyboard = [
-        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
-        [InlineKeyboardButton("✅ Продолжить", callback_data="continue_menu")]
+        [InlineKeyboardButton("⭐ Купить звёзды", callback_data="buy_stars")],
+        [InlineKeyboardButton("🤝 Партнёрская программа", callback_data="ref_system")],
+        [InlineKeyboardButton("🆘 Помощь", callback_data="help")]
     ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        f"👋 Добро пожаловать!\n\n"
-        f"Чтобы пользоваться ботом, подпишитесь на наш канал 👉 @{CHANNEL_USERNAME}\n"
-        f"После этого нажмите «Продолжить».",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Привет! 👋\n\n"
+        "Это бот для покупки звёзд ⭐.\n"
+        "Выберите действие:",
+        reply_markup=reply_markup
     )
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("ℹ️ Напишите админу для помощи.")
 
-# === Главное меню ===
-def main_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
-        [InlineKeyboardButton("📜 История покупок", callback_data="history")],
-        [InlineKeyboardButton("👥 Реферальная система", callback_data="ref_system")],
-        [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
-    ])
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return await update.message.reply_text("⛔ Команда доступна только админу")
 
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    users_count = c.fetchone()[0]
+    conn.close()
 
-# === Обработка меню ===
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"📊 Всего пользователей: {users_count}")
+
+# ==================== #
+# Кнопки
+# ==================== #
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "continue_menu":
-        await query.message.reply_text("🏠 Главное меню:", reply_markup=main_menu_keyboard())
+    user_id = query.from_user.id
 
-    elif query.data == "buy_stars":
-        await query.message.reply_text(
-            f"⭐ Минимальное количество: {MIN_STARS}\n"
-            f"⭐ Максимальное количество: {MAX_STARS}\n"
-            f"💰 Цена за 1 звезду: {PRICE_PER_STAR} TON\n\n"
-            "Введите количество звёзд, которое хотите купить:"
-        )
-        context.user_data["waiting_for_stars"] = True
-
-    elif query.data == "history":
-        user_id = query.from_user.id
-        conn = await asyncpg.connect(DATABASE_URL)
-        rows = await conn.fetch("SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", user_id)
-        await conn.close()
-        if rows:
-            text = "📜 Ваша история покупок:\n\n" + "\n".join(
-                [f"№{r['id']} | ⭐ {r['stars']} | {r['amount']} TON | {r['status']}" for r in rows]
-            )
-        else:
-            text = "📜 Ваша история покупок пока пуста."
-        await query.message.reply_text(text)
+    if query.data == "buy_stars":
+        await query.edit_message_text("💳 Отправьте сумму перевода (в звёздах).")
+        context.user_data["awaiting_payment"] = True
 
     elif query.data == "ref_system":
-        user_id = query.from_user.id
-        balance, total_ref_earned, invites = await get_balance_refstats_invites(user_id)
+        user = get_user(user_id)
         ref_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
-        text = (
-            f"👥 *Реферальная система*\n\n"
-            f"🔗 Ваша личная ссылка:\n{ref_link}\n\n"
-            f"👤 Приглашено друзей: *{invites}*\n"
-            f"💎 Баланс: *{balance}* ⭐\n"
-            f"🌟 Всего заработано от друзей: *{total_ref_earned}* ⭐\n\n"
-            f"⚡ За первую покупку приглашённого вы получаете +{REF_BONUS} ⭐!\n\n"
-            f"⏳ Вывод бонусов будет доступен *скоро*. Продолжайте приглашать друзей 🚀"
+        await query.edit_message_text(
+            f"🤝 Ваша реферальная ссылка:\n{ref_link}\n\n"
+            f"💰 Текущий реферальный баланс: {user['ref_balance']:.2f} ⭐\n"
+            f"🌟 Всего заработано: {user['total_ref_earned']:.2f} ⭐\n\n"
+            "⚡ Вывод бонусов будет доступен скоро.\n"
+            "Продолжайте приглашать друзей! 🚀"
         )
 
-        keyboard = [[InlineKeyboardButton("🏠 Главное меню", callback_data="continue_menu")]]
-        await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    elif query.data == "help":
+        await query.edit_message_text("📩 Свяжитесь с админом для помощи.")
 
-    elif query.data == "fake_buy":
-        phrases = [
-            "🚫 Нет денег — нет конфетки 🍭",
-            "🤗 Всё ещё впереди! Иди работай 💼",
-            "🥲 Халявы нет, брат… только работа и TON 💎",
-        ]
-        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="continue_menu")]]
-        await query.message.reply_text(random.choice(phrases), reply_markup=InlineKeyboardMarkup(keyboard))
+    elif query.data.startswith("confirm_"):
+        _, user_id, order_id, amount = query.data.split("_")
+        user_id, order_id, amount = int(user_id), int(order_id), float(amount)
 
+        update_order_status(order_id, "✅ Подтверждено")
+        update_balance(user_id, amount)
 
-# === Обработка текста (ввод кол-ва звёзд) ===
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("waiting_for_stars"):
-        try:
-            stars = int(update.message.text)
-            if stars < MIN_STARS or stars > MAX_STARS:
-                await update.message.reply_text(
-                    f"❌ Введите число от {MIN_STARS} до {MAX_STARS}."
-                )
-                return
-
-            amount_ton = stars * PRICE_PER_STAR
-            order_id = await add_order(update.message.from_user.id, stars, amount_ton)
-
-            context.user_data["waiting_for_stars"] = False
-            context.user_data["pending_order"] = {"id": order_id, "stars": stars, "amount": amount_ton}
-
-            text = (
-                f"💰 Заявка №{order_id}\n"
-                f"⭐ Кол-во звёзд: {stars}\n"
-                f"💎 Сумма: {amount_ton:.2f} TON\n\n"
-                f"🔗 Отправьте {amount_ton:.2f} TON на кошелёк:\n"
-                f"`{TON_WALLET}`\n\n"
-                "📸 После перевода отправьте скриншот!"
-            )
-            await update.message.reply_text(text, parse_mode="Markdown")
-
-        except ValueError:
-            await update.message.reply_text("❌ Введите корректное число.")
-
-
-# === Обработка фото (скриншот) ===
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "pending_order" in context.user_data:
-        order = context.user_data["pending_order"]
-
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order['id']}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{order['id']}")
-            ]
-        ]
-
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"💰 Новая оплата!\n"
-            f"👤 Пользователь: @{update.message.from_user.username}\n"
-            f"⭐ Кол-во звёзд: {order['stars']}\n"
-            f"💎 Сумма: {order['amount']:.2f} TON\n"
-            f"🆔 Заявка №{order['id']}\n"
-            f"⏳ Статус: Ожидает подтверждения",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        await update.message.reply_text("📤 Скриншот получен! Ожидайте подтверждения администратора.")
-
-
-# === Админ подтверждает/отклоняет ===
-async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data.startswith("confirm_"):
-        order_id = int(query.data.split("_")[1])
-
-        await update_order_status(order_id, "✅ Подтверждено")
-
-        conn = await asyncpg.connect(DATABASE_URL)
-        user_id = await conn.fetchval("SELECT user_id FROM orders WHERE id=$1", order_id)
-        await conn.close()
-
-        user = await get_user(user_id)
+        # начисляем реф бонус
+        user = get_user(user_id)
         if user and user["invited_by"]:
-            conn = await asyncpg.connect(DATABASE_URL)
-            cnt = await conn.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='✅ Подтверждено'", user_id)
-            await conn.close()
-            if cnt == 1:
-                await add_bonus(user["invited_by"])
+            bonus = amount * REF_PERCENT
+            add_ref_bonus(user["invited_by"], bonus)
 
-        await context.bot.send_message(
-            user_id,
-            f"✅ Оплата подтверждена!\n"
-            f"⭐ Заявка №{order_id} выполнена."
-        )
-        await query.message.reply_text("✅ Оплата подтверждена.")
+        await query.edit_message_text(f"✅ Заказ {order_id} подтверждён. Пользователю начислено {amount} ⭐.")
 
     elif query.data.startswith("reject_"):
-        order_id = int(query.data.split("_")[1])
+        _, user_id, order_id = query.data.split("_")
+        order_id = int(order_id)
+        update_order_status(order_id, "❌ Отклонено")
+        await query.edit_message_text(f"❌ Заказ {order_id} отклонён.")
 
-        await update_order_status(order_id, "❌ Отклонено")
+# ==================== #
+# Обработка сообщений
+# ==================== #
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
 
-        conn = await asyncpg.connect(DATABASE_URL)
-        user_id = await conn.fetchval("SELECT user_id FROM orders WHERE id=$1", order_id)
-        await conn.close()
+    # если ждём оплату
+    if context.user_data.get("awaiting_payment"):
+        try:
+            amount = float(text)
+        except ValueError:
+            return await update.message.reply_text("Введите число (количество звёзд).")
+
+        order_id = add_order(user_id, amount)
+        context.user_data["awaiting_payment"] = False
+
+        # уведомляем админа
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}_{order_id}_{amount}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}_{order_id}")
+            ]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
 
         await context.bot.send_message(
-            user_id,
-            f"❌ Оплата отклонена.\n🆔 Заявка №{order_id}"
+            chat_id=ADMIN_ID,
+            text=f"📩 Новый заказ #{order_id}\n"
+                 f"Пользователь: {user_id}\n"
+                 f"Сумма: {amount} ⭐",
+            reply_markup=markup
         )
-        await query.message.reply_text("❌ Оплата отклонена.")
+
+        await update.message.reply_text("🕐 Заказ отправлен на проверку. Ожидайте подтверждения.")
+    else:
+        await update.message.reply_text("Не понял сообщение. Используйте меню.")
 
 
-# === Команда /stats для админа ===
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id == ADMIN_ID:
-        conn = await asyncpg.connect(DATABASE_URL)
-        users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        orders_count = await conn.fetchval("SELECT COUNT(*) FROM orders")
-        await conn.close()
-        await update.message.reply_text(f"📊 Статистика:\n👥 Пользователей: {users_count}\n🛒 Заявок: {orders_count}")
-
-
-# === Основной запуск ===
+# ==================== #
+# Запуск
+# ==================== #
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    init_db()
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CallbackQueryHandler(admin_handler, pattern="^(confirm_|reject_)"))
-    app.add_handler(CallbackQueryHandler(menu_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("stats", stats))
 
-    app.run_polling()
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+    application.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(init_db())
     main()
