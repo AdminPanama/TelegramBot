@@ -20,7 +20,7 @@ if not TON_WALLET:
 ADMIN_ID = int(ADMIN_ID)
 # ====================
 
-PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
+PRICE_PER_STAR = 0.00499  # Цена за 1 звезду в TON
 MIN_STARS = 50
 MAX_STARS = 10000
 
