@@ -262,6 +262,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
 
+        # 🔥 Вернул полное уведомление админу
         await context.bot.send_message(
             ADMIN_ID,
             f"💰 Новая оплата!\n"
@@ -296,9 +297,12 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if cnt == 1:  # первая успешная покупка
                 await add_bonus(user["invited_by"])
 
+        # 🔥 Сообщение пользователю с деталями
         await context.bot.send_message(
             user_id,
-            f"✅ Оплата подтверждена!\n⭐ Вам начислено звёзд.\n🆔 Заявка №{tx_id}"
+            f"✅ Оплата подтверждена!\n"
+            f"⭐ Начислено звёзд: {tx_id}\n"
+            f"🆔 Заявка №{tx_id}"
         )
         await query.message.reply_text("✅ Оплата подтверждена.")
 
@@ -308,7 +312,11 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update_order_status(user_id, tx_id, "❌ Отклонено")
 
-        await context.bot.send_message(user_id, f"❌ Оплата отклонена.\n🆔 Заявка №{tx_id}")
+        # 🔥 Сообщение пользователю с деталями
+        await context.bot.send_message(
+            user_id,
+            f"❌ Оплата отклонена.\n🆔 Заявка №{tx_id}"
+        )
         await query.message.reply_text("❌ Оплата отклонена.")
 
 
