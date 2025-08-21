@@ -83,19 +83,17 @@ async def add_user(telegram_id, username, invited_by=None):
 
 async def add_order(user_id, stars, amount, status="Ожидает подтверждения"):
     conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "INSERT INTO orders (user_id, stars, amount, status) VALUES ($1,$2,$3,$4)",
+    row = await conn.fetchrow(
+        "INSERT INTO orders (user_id, stars, amount, status) VALUES ($1,$2,$3,$4) RETURNING id",
         user_id, stars, amount, status
     )
     await conn.close()
+    return row["id"]
 
 
-async def update_order_status(user_id, tx_id, status):
+async def update_order_status(order_id, status):
     conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute(
-        "UPDATE orders SET status=$1 WHERE user_id=$2 AND id=$3",
-        status, user_id, tx_id
-    )
+    await conn.execute("UPDATE orders SET status=$1 WHERE id=$2", status, order_id)
     await conn.close()
 
 
@@ -118,18 +116,13 @@ async def get_balance_refstats_invites(user_id):
     return 0, 0, 0
 
 
-# === Генерация ID заявки ===
-def generate_tx_id():
-    return ''.join(random.choices(string.digits, k=6))
-
-
 # === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
 
     ref_id = None
-    if context.args:  # если /start с реф ссылкой
+    if context.args:
         try:
             ref_id = int(context.args[0])
         except:
@@ -229,13 +222,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             amount_ton = stars * PRICE_PER_STAR
-            tx_id = generate_tx_id()
-            context.user_data["waiting_for_stars"] = False
+            order_id = await add_order(update.message.from_user.id, stars, amount_ton)
 
-            await add_order(update.message.from_user.id, stars, amount_ton)
+            context.user_data["waiting_for_stars"] = False
+            context.user_data["pending_order"] = {"id": order_id, "stars": stars, "amount": amount_ton}
 
             text = (
-                f"💰 Заявка №{tx_id}\n"
+                f"💰 Заявка №{order_id}\n"
                 f"⭐ Кол-во звёзд: {stars}\n"
                 f"💎 Сумма: {amount_ton:.2f} TON\n\n"
                 f"🔗 Отправьте {amount_ton:.2f} TON на кошелёк:\n"
@@ -243,8 +236,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📸 После перевода отправьте скриншот!"
             )
             await update.message.reply_text(text, parse_mode="Markdown")
-
-            context.user_data["pending_order"] = {"id": tx_id, "stars": stars, "amount": amount_ton}
 
         except ValueError:
             await update.message.reply_text("❌ Введите корректное число.")
@@ -257,12 +248,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard = [
             [
-                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{update.message.from_user.id}_{order['id']}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{update.message.from_user.id}_{order['id']}")
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{order['id']}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{order['id']}")
             ]
         ]
 
-        # 🔥 Вернул полное уведомление админу
         await context.bot.send_message(
             ADMIN_ID,
             f"💰 Новая оплата!\n"
@@ -283,39 +273,41 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data.startswith("confirm_"):
-        _, user_id, tx_id = query.data.split("_")
-        user_id = int(user_id)
+        order_id = int(query.data.split("_")[1])
 
-        await update_order_status(user_id, tx_id, "✅ Подтверждено")
+        await update_order_status(order_id, "✅ Подтверждено")
 
-        # проверим, есть ли пригласитель и это первая покупка
+        conn = await asyncpg.connect(DATABASE_URL)
+        user_id = await conn.fetchval("SELECT user_id FROM orders WHERE id=$1", order_id)
+        await conn.close()
+
         user = await get_user(user_id)
         if user and user["invited_by"]:
             conn = await asyncpg.connect(DATABASE_URL)
             cnt = await conn.fetchval("SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='✅ Подтверждено'", user_id)
             await conn.close()
-            if cnt == 1:  # первая успешная покупка
+            if cnt == 1:
                 await add_bonus(user["invited_by"])
 
-        # 🔥 Сообщение пользователю с деталями
         await context.bot.send_message(
             user_id,
             f"✅ Оплата подтверждена!\n"
-            f"⭐ Начислено звёзд: {tx_id}\n"
-            f"🆔 Заявка №{tx_id}"
+            f"⭐ Заявка №{order_id} выполнена."
         )
         await query.message.reply_text("✅ Оплата подтверждена.")
 
     elif query.data.startswith("reject_"):
-        _, user_id, tx_id = query.data.split("_")
-        user_id = int(user_id)
+        order_id = int(query.data.split("_")[1])
 
-        await update_order_status(user_id, tx_id, "❌ Отклонено")
+        await update_order_status(order_id, "❌ Отклонено")
 
-        # 🔥 Сообщение пользователю с деталями
+        conn = await asyncpg.connect(DATABASE_URL)
+        user_id = await conn.fetchval("SELECT user_id FROM orders WHERE id=$1", order_id)
+        await conn.close()
+
         await context.bot.send_message(
             user_id,
-            f"❌ Оплата отклонена.\n🆔 Заявка №{tx_id}"
+            f"❌ Оплата отклонена.\n🆔 Заявка №{order_id}"
         )
         await query.message.reply_text("❌ Оплата отклонена.")
 
