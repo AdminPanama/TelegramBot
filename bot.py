@@ -1,269 +1,312 @@
 import os
-import logging
-import sqlite3
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import json
+import random
+import string
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 
-# ==================== #
-# Логирование
-# ==================== #
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ==================== #
-# Настройки
-# ==================== #
+# ====================
+# Настройки из Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = os.getenv("ADMIN_ID")
+TON_WALLET = os.getenv("TON_WALLET")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # имя канала без @
 
-DB_PATH = "bot.db"
-REF_PERCENT = 0.01  # 1% бонус от покупок рефералов
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не задан в переменных окружения")
+if not ADMIN_ID:
+    raise ValueError("❌ ADMIN_ID не задан в переменных окружения")
+if not TON_WALLET:
+    raise ValueError("❌ TON_WALLET не задан в переменных окружения")
+if not CHANNEL_USERNAME:
+    raise ValueError("❌ CHANNEL_USERNAME не задан в переменных окружения")
 
-# ==================== #
-# Работа с БД
-# ==================== #
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+ADMIN_ID = int(ADMIN_ID)
+# ====================
 
-    # пользователи
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        username TEXT,
-        balance REAL DEFAULT 0,
-        invited_by INTEGER,
-        ref_balance REAL DEFAULT 0,
-        total_ref_earned REAL DEFAULT 0
-    )""")
+PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
+MIN_STARS = 50
+MAX_STARS = 10000
+REF_PERCENT = 0.01  # 1% бонуса пригласившему
 
-    # заказы
-    c.execute("""CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        amount REAL,
-        status TEXT
-    )""")
+USERS = {}  # user_id: {"username": str, "balance": int, "referrals": [], "ref_earned": float, "inviter": int|None}
+TOTAL_ORDERS = 0
+DATA_FILE = "users.json"
 
-    conn.commit()
-    conn.close()
 
-def add_user(user_id, username, invited_by=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE id=?", (user_id,))
-    if not c.fetchone():
-        c.execute("INSERT INTO users (id, username, invited_by) VALUES (?, ?, ?)",
-                  (user_id, username, invited_by))
-    conn.commit()
-    conn.close()
+# === Работа с базой пользователей ===
+def load_users():
+    global USERS
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            USERS = json.load(f)
+    else:
+        USERS = {}
 
-def get_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "username": row[1],
-            "balance": row[2],
-            "invited_by": row[3],
-            "ref_balance": row[4],
-            "total_ref_earned": row[5]
-        }
-    return None
+def save_users():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(USERS, f, ensure_ascii=False, indent=2)
 
-def update_balance(user_id, amount):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance + ? WHERE id=?", (amount, user_id))
-    conn.commit()
-    conn.close()
 
-def add_ref_bonus(user_id, bonus):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""UPDATE users 
-                 SET ref_balance = ref_balance + ?, 
-                     total_ref_earned = total_ref_earned + ? 
-                 WHERE id=?""", (bonus, bonus, user_id))
-    conn.commit()
-    conn.close()
+# === Генерация ID заявки ===
+def generate_tx_id():
+    return ''.join(random.choices(string.digits, k=6))
 
-def add_order(user_id, amount):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO orders (user_id, amount, status) VALUES (?, ?, ?)",
-              (user_id, amount, "⏳ Ожидание"))
-    conn.commit()
-    conn.close()
-    return c.lastrowid
 
-def update_order_status(order_id, status):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
-    conn.commit()
-    conn.close()
-
-# ==================== #
-# Команды
-# ==================== #
+# === Команда /start ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    ref_id = None
+    user = update.message.from_user
+    user_id = str(user.id)
+    referrer = None
 
-    # проверяем, есть ли рефка
+    # обработка ссылки-приглашения /start 12345
     if context.args:
-        try:
-            ref_id = int(context.args[0])
-        except ValueError:
-            pass
+        referrer = context.args[0]
 
-    add_user(user.id, user.username, ref_id)
+    if user_id not in USERS:
+        USERS[user_id] = {
+            "username": user.username or "",
+            "balance": 0,
+            "referrals": [],
+            "ref_earned": 0,
+            "inviter": referrer if referrer and referrer != user_id else None
+        }
+        if referrer and referrer in USERS:
+            USERS[referrer]["referrals"].append(user_id)
+        save_users()
 
     keyboard = [
-        [InlineKeyboardButton("⭐ Купить звёзды", callback_data="buy_stars")],
-        [InlineKeyboardButton("🤝 Партнёрская программа", callback_data="ref_system")],
-        [InlineKeyboardButton("🆘 Помощь", callback_data="help")]
+        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
+        [InlineKeyboardButton("✅ Продолжить", callback_data="continue_menu")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "Привет! 👋\n\n"
-        "Это бот для покупки звёзд ⭐.\n"
-        "Выберите действие:",
-        reply_markup=reply_markup
+        f"👋 Добро пожаловать!\n\n"
+        f"Чтобы пользоваться ботом, подпишитесь на наш канал 👉 @{CHANNEL_USERNAME}\n"
+        f"После этого нажмите «Продолжить».",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ℹ️ Напишите админу для помощи.")
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return await update.message.reply_text("⛔ Команда доступна только админу")
+# === Главное меню ===
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ Купить звезды", callback_data="buy_stars")],
+        [InlineKeyboardButton("📜 История покупок", callback_data="history")],
+        [InlineKeyboardButton("🎁 Реферальная программа", callback_data="ref_system")],
+        [InlineKeyboardButton("😂 Купить без денег", callback_data="fake_buy")]
+    ])
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users")
-    users_count = c.fetchone()[0]
-    conn.close()
 
-    await update.message.reply_text(f"📊 Всего пользователей: {users_count}")
+# === Обработка меню ===
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
 
-# ==================== #
-# Кнопки
-# ==================== #
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if query.data == "continue_menu":
+        await query.message.reply_text("🏠 Главное меню:", reply_markup=main_menu_keyboard())
+
+    elif query.data == "buy_stars":
+        await query.message.reply_text(
+            f"⭐ Минимальное количество: {MIN_STARS}\n"
+            f"⭐ Максимальное количество: {MAX_STARS}\n"
+            f"💰 Цена за 1 звезду: {PRICE_PER_STAR} TON\n\n"
+            "Введите количество звёзд, которое хотите купить:"
+        )
+        context.user_data["waiting_for_stars"] = True
+
+    elif query.data == "history":
+        history = context.user_data.get("history", [])
+        if history:
+            text = "📜 Ваша история покупок:\n\n" + "\n".join(history)
+        else:
+            text = "📜 Ваша история покупок пока пуста."
+        await query.message.reply_text(text)
+
+    elif query.data == "ref_system":
+        user = USERS.get(user_id, {})
+        balance = user.get("balance", 0)
+        earned = user.get("ref_earned", 0)
+        ref_link = f"https://t.me/{context.bot.username}?start={user_id}"
+
+        text = (
+            f"🎁 Реферальная программа\n\n"
+            f"👤 Ваш ID: {user_id}\n"
+            f"💰 Баланс: {balance} ⭐\n"
+            f"💎 Заработано с рефералов: {earned:.2f} ⭐\n\n"
+            f"🔗 Ваша ссылка:\n{ref_link}\n\n"
+            "📝 Вывод средств будет доступен SOON. Продолжайте приглашать друзей!"
+        )
+        await query.message.reply_text(text)
+
+    elif query.data == "fake_buy":
+        phrases = [
+            "🚫 Нет денег — нет конфетки 🍭",
+            "🤗 Всё ещё впереди! Иди работай 💼",
+            "🥲 Халявы нет, брат… только работа и TON 💎",
+            "🐒 Обезьяна тоже хотела бесплатно, но пошла бананы собирать 🍌",
+            "🕺 Звёзды без денег? Это не астрономия, дружище 🌌",
+            "😎 Работай, плати — получай звёзды. Всё просто 🚀",
+            "🏚️ В кредит звёзды не выдаём, сорри 💳",
+            "🤡 Ага, щас! Бесплатно только сыр… и то в мышеловке 🧀",
+            "🧘 Терпение, молодец. Денег нет — значит время копить 🙏",
+            "🪙 TON не растут на деревьях, их майнят 💻"
+        ]
+        keyboard = [[InlineKeyboardButton("🏠 Вернуться в меню", callback_data="continue_menu")]]
+        await query.message.reply_text(random.choice(phrases), reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+# === Обработка текста (ввод кол-ва звёзд) ===
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("waiting_for_stars"):
+        try:
+            stars = int(update.message.text)
+            if stars < MIN_STARS or stars > MAX_STARS:
+                await update.message.reply_text(
+                    f"❌ Введите число от {MIN_STARS} до {MAX_STARS}."
+                )
+                return
+
+            amount_ton = stars * PRICE_PER_STAR
+            tx_id = generate_tx_id()
+            context.user_data["waiting_for_stars"] = False
+
+            text = (
+                f"💰 Заявка №{tx_id}\n"
+                f"⭐ Кол-во звёзд: {stars}\n"
+                f"💎 Сумма: {amount_ton:.2f} TON\n\n"
+                f"🔗 Отправьте {amount_ton:.2f} TON на кошелёк:\n"
+                f"`{TON_WALLET}`\n\n"
+                "📸 После перевода отправьте скриншот!"
+            )
+            await update.message.reply_text(text, parse_mode="Markdown")
+
+            context.user_data["pending_order"] = {
+                "id": tx_id,
+                "stars": stars,
+                "amount": amount_ton,
+                "status": "Ожидает подтверждения"
+            }
+
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректное число.")
+
+
+# === Обработка фото (скриншот) ===
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "pending_order" in context.user_data:
+        order = context.user_data["pending_order"]
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{update.message.from_user.id}_{order['id']}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{update.message.from_user.id}_{order['id']}")
+            ]
+        ]
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"💰 Новая оплата!\n"
+            f"👤 Пользователь: @{update.message.from_user.username}\n"
+            f"⭐ Кол-во звёзд: {order['stars']}\n"
+            f"💎 Сумма: {order['amount']:.2f} TON\n"
+            f"🆔 Заявка №{order['id']}\n"
+            f"⏳ Статус: Ожидает подтверждения",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        await update.message.reply_text(
+            "📤 Скриншот получен! Ожидайте подтверждения администратора."
+        )
+
+
+# === Админ подтверждает/отклоняет ===
+async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    if query.data.startswith("confirm_"):
+        _, user_id, tx_id = query.data.split("_")
+        user_id = str(user_id)
 
-    if query.data == "buy_stars":
-        await query.edit_message_text("💳 Отправьте сумму перевода (в звёздах).")
-        context.user_data["awaiting_payment"] = True
+        order = context.user_data.get("pending_order")
+        if order and order["id"] == tx_id:
+            order["status"] = "✅ Подтверждено"
+            context.user_data.setdefault("history", []).append(
+                f"⭐ {order['stars']} | {order['amount']:.2f} TON | ✅ Подтверждено"
+            )
 
-    elif query.data == "ref_system":
-        user = get_user(user_id)
-        ref_link = f"https://t.me/{context.bot.username}?start={user_id}"
-        await query.edit_message_text(
-            f"🤝 Ваша реферальная ссылка:\n{ref_link}\n\n"
-            f"💰 Текущий реферальный баланс: {user['ref_balance']:.2f} ⭐\n"
-            f"🌟 Всего заработано: {user['total_ref_earned']:.2f} ⭐\n\n"
-            "⚡ Вывод бонусов будет доступен скоро.\n"
-            "Продолжайте приглашать друзей! 🚀"
-        )
+            # начисляем звезды пользователю
+            USERS[user_id]["balance"] += order["stars"]
 
-    elif query.data == "help":
-        await query.edit_message_text("📩 Свяжитесь с админом для помощи.")
+            # начисляем реферальный бонус
+            inviter = USERS[user_id].get("inviter")
+            if inviter and inviter in USERS:
+                bonus = order["stars"] * REF_PERCENT
+                USERS[inviter]["balance"] += bonus
+                USERS[inviter]["ref_earned"] += bonus
+                await context.bot.send_message(
+                    int(inviter),
+                    f"🎁 Ваш реферал совершил покупку!\n"
+                    f"💎 Вам начислено {bonus:.2f} ⭐"
+                )
 
-    elif query.data.startswith("confirm_"):
-        _, user_id, order_id, amount = query.data.split("_")
-        user_id, order_id, amount = int(user_id), int(order_id), float(amount)
+            save_users()
 
-        update_order_status(order_id, "✅ Подтверждено")
-        update_balance(user_id, amount)
-
-        # начисляем реф бонус
-        user = get_user(user_id)
-        if user and user["invited_by"]:
-            bonus = amount * REF_PERCENT
-            add_ref_bonus(user["invited_by"], bonus)
-
-        await query.edit_message_text(f"✅ Заказ {order_id} подтверждён. Пользователю начислено {amount} ⭐.")
+            await context.bot.send_message(
+                int(user_id),
+                f"✅ Оплата подтверждена!\n"
+                f"⭐ Вам начислено {order['stars']} звёзд.\n"
+                f"🆔 Заявка №{order['id']}"
+            )
+            await query.message.reply_text("✅ Оплата подтверждена.")
 
     elif query.data.startswith("reject_"):
-        _, user_id, order_id = query.data.split("_")
-        order_id = int(order_id)
-        update_order_status(order_id, "❌ Отклонено")
-        await query.edit_message_text(f"❌ Заказ {order_id} отклонён.")
+        _, user_id, tx_id = query.data.split("_")
+        user_id = str(user_id)
 
-# ==================== #
-# Обработка сообщений
-# ==================== #
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
+        order = context.user_data.get("pending_order")
+        if order and order["id"] == tx_id:
+            order["status"] = "❌ Отклонено"
+            context.user_data.setdefault("history", []).append(
+                f"⭐ {order['stars']} | {order['amount']:.2f} TON | ❌ Отклонено"
+            )
 
-    # если ждём оплату
-    if context.user_data.get("awaiting_payment"):
-        try:
-            amount = float(text)
-        except ValueError:
-            return await update.message.reply_text("Введите число (количество звёзд).")
+            await context.bot.send_message(
+                int(user_id),
+                f"❌ Оплата отклонена.\n"
+                f"🆔 Заявка №{order['id']}"
+            )
+            await query.message.reply_text("❌ Оплата отклонена.")
 
-        order_id = add_order(user_id, amount)
-        context.user_data["awaiting_payment"] = False
 
-        # уведомляем админа
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}_{order_id}_{amount}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}_{order_id}")
-            ]
-        ]
-        markup = InlineKeyboardMarkup(keyboard)
-
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"📩 Новый заказ #{order_id}\n"
-                 f"Пользователь: {user_id}\n"
-                 f"Сумма: {amount} ⭐",
-            reply_markup=markup
+# === Команда /stats для админа ===
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id == ADMIN_ID:
+        await update.message.reply_text(
+            f"📊 Статистика:\n"
+            f"👥 Пользователей: {len(USERS)}\n"
+            f"🛒 Заявок: {TOTAL_ORDERS}"
         )
 
-        await update.message.reply_text("🕐 Заказ отправлен на проверку. Ожидайте подтверждения.")
-    else:
-        await update.message.reply_text("Не понял сообщение. Используйте меню.")
 
-
-# ==================== #
-# Запуск
-# ==================== #
+# === Основной запуск ===
 def main():
-    init_db()
-    application = Application.builder().token(BOT_TOKEN).build()
+    load_users()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CallbackQueryHandler(admin_handler, pattern="^(confirm_|reject_)"))
+    app.add_handler(CallbackQueryHandler(menu_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.run_polling()
 
-    application.run_polling()
 
 if __name__ == "__main__":
     main()
