@@ -244,6 +244,18 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = ORDERS.get(tx_id)
         if order:
             order["status"] = "✅ Подтверждено"
+
+            # Создаем запись для нового юзера, если его ещё нет
+            if user_id not in USERS:
+                USERS[user_id] = {
+                    "username": "",
+                    "balance": 0,
+                    "referrals": [],
+                    "ref_earned": 0,
+                    "inviter": None,
+                    "history": []
+                }
+
             USERS[user_id]["history"].append(
                 f"⭐ {order['stars']} | {order['amount']:.2f} TON | ✅ Подтверждено"
             )
@@ -265,6 +277,18 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = ORDERS.get(tx_id)
         if order:
             order["status"] = "❌ Отклонено"
+
+            # Создаем запись для нового юзера, если его ещё нет
+            if user_id not in USERS:
+                USERS[user_id] = {
+                    "username": "",
+                    "balance": 0,
+                    "referrals": [],
+                    "ref_earned": 0,
+                    "inviter": None,
+                    "history": []
+                }
+
             USERS[user_id]["history"].append(
                 f"⭐ {order['stars']} | {order['amount']:.2f} TON | ❌ Отклонено"
             )
