@@ -337,6 +337,31 @@ async def add_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 
+# === Команда /massaddstars для админа ===
+async def mass_add_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        stars = int(context.args[0])
+        count = 0
+
+        for user_id in USERS.keys():
+            USERS[user_id]["balance"] += stars
+            USERS[user_id]["history"].append(f"🎁 Массовое начисление {stars} ⭐")
+            try:
+                await context.bot.send_message(int(user_id), f"🎁 Вам начислено {stars} ⭐ (массовая раздача)")
+            except:
+                pass
+            count += 1
+
+        save_users()
+        await update.message.reply_text(f"✅ Начислено по {stars} ⭐ всем ({count}) пользователям.")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 # === Команда /stats для админа ===
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id == ADMIN_ID:
@@ -355,6 +380,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("addstars", add_stars))
+    app.add_handler(CommandHandler("massaddstars", mass_add_stars))  # 🔥 массовая раздача
 
     app.add_handler(CallbackQueryHandler(admin_handler, pattern="^(confirm_|reject_)"))
     app.add_handler(CallbackQueryHandler(menu_handler))
