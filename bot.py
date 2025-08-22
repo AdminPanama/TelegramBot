@@ -34,7 +34,6 @@ REF_PERCENT = 0.01  # 1% бонуса пригласившему
 
 USERS = {}   # user_id: {...}
 ORDERS = {}  # order_id: {"user_id", "stars", "amount", "status"}
-TOTAL_ORDERS = 0
 DATA_FILE = "users.json"
 
 
@@ -245,29 +244,19 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = ORDERS.get(tx_id)
         if order:
             order["status"] = "✅ Подтверждено"
-
-            USERS[user_id]["balance"] += order["stars"]
             USERS[user_id]["history"].append(
                 f"⭐ {order['stars']} | {order['amount']:.2f} TON | ✅ Подтверждено"
             )
-
-            inviter = USERS[user_id].get("inviter")
-            if inviter and inviter in USERS:
-                bonus = order["stars"] * REF_PERCENT
-                USERS[inviter]["balance"] += bonus
-                USERS[inviter]["ref_earned"] += bonus
-                await context.bot.send_message(
-                    int(inviter),
-                    f"🎁 Ваш реферал совершил покупку!\n💎 Вам начислено {bonus:.2f} ⭐"
-                )
-
             save_users()
 
             await context.bot.send_message(
                 int(user_id),
-                f"✅ Оплата подтверждена!\n⭐ Вам начислено {order['stars']} звёзд.\n🆔 Заявка №{order['id']}"
+                "✅ Ваша заявка успешно принята и обработана!\n\n"
+                "Спасибо за покупку, ожидайте поступления звёзд ✨\n"
+                "Звёзды придут в течение 15 минут.\n"
+                "Если задержка больше 2 часов — обратитесь в администрацию."
             )
-            await query.edit_message_text("✅ Оплата подтверждена.")
+            await query.edit_message_text("✅ Оплата подтверждена (без автопополнения).")
 
     elif query.data.startswith("reject_"):
         _, user_id, tx_id = query.data.split("_")
@@ -283,7 +272,7 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await context.bot.send_message(
                 int(user_id),
-                f"❌ Оплата отклонена.\n🆔 Заявка №{order['id']}"
+                f"❌ Ваша заявка отклонена.\n🆔 Заявка №{order['id']}"
             )
             await query.edit_message_text("❌ Оплата отклонена.")
 
