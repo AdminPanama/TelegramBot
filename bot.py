@@ -32,7 +32,8 @@ MIN_STARS = 50
 MAX_STARS = 10000
 REF_PERCENT = 0.01  # 1% бонуса пригласившему
 
-USERS = {}  # user_id: {"username": str, "balance": int, "referrals": [], "ref_earned": float, "inviter": int|None}
+USERS = {}   # user_id: {...}
+ORDERS = {}  # order_id: {"user_id", "stars", "amount", "status"}
 TOTAL_ORDERS = 0
 DATA_FILE = "users.json"
 
@@ -62,7 +63,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     referrer = None
 
-    # обработка ссылки-приглашения /start 12345
     if context.args:
         referrer = context.args[0]
 
@@ -72,7 +72,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "balance": 0,
             "referrals": [],
             "ref_earned": 0,
-            "inviter": referrer if referrer and referrer != user_id else None
+            "inviter": referrer if referrer and referrer != user_id else None,
+            "history": []
         }
         if referrer and referrer in USERS:
             USERS[referrer]["referrals"].append(user_id)
@@ -119,7 +120,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_for_stars"] = True
 
     elif query.data == "history":
-        history = context.user_data.get("history", [])
+        history = USERS.get(user_id, {}).get("history", [])
         if history:
             text = "📜 Ваша история покупок:\n\n" + "\n".join(history)
         else:
@@ -174,6 +175,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tx_id = generate_tx_id()
             context.user_data["waiting_for_stars"] = False
 
+            order = {
+                "id": tx_id,
+                "user_id": update.message.from_user.id,
+                "stars": stars,
+                "amount": amount_ton,
+                "status": "Ожидает подтверждения"
+            }
+            ORDERS[tx_id] = order
+
             text = (
                 f"💰 Заявка №{tx_id}\n"
                 f"⭐ Кол-во звёзд: {stars}\n"
@@ -184,26 +194,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(text, parse_mode="Markdown")
 
-            context.user_data["pending_order"] = {
-                "id": tx_id,
-                "stars": stars,
-                "amount": amount_ton,
-                "status": "Ожидает подтверждения"
-            }
-
         except ValueError:
             await update.message.reply_text("❌ Введите корректное число.")
 
 
 # === Обработка фото (скриншот) ===
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "pending_order" in context.user_data:
-        order = context.user_data["pending_order"]
+    user_id = str(update.message.from_user.id)
 
+    # ищем последнюю заявку пользователя
+    last_order = None
+    for o in ORDERS.values():
+        if str(o["user_id"]) == user_id and o["status"] == "Ожидает подтверждения":
+            last_order = o
+            break
+
+    if last_order:
         keyboard = [
             [
-                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{update.message.from_user.id}_{order['id']}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{update.message.from_user.id}_{order['id']}")
+                InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{user_id}_{last_order['id']}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}_{last_order['id']}")
             ]
         ]
 
@@ -211,9 +221,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ADMIN_ID,
             f"💰 Новая оплата!\n"
             f"👤 Пользователь: @{update.message.from_user.username}\n"
-            f"⭐ Кол-во звёзд: {order['stars']}\n"
-            f"💎 Сумма: {order['amount']:.2f} TON\n"
-            f"🆔 Заявка №{order['id']}\n"
+            f"⭐ Кол-во звёзд: {last_order['stars']}\n"
+            f"💎 Сумма: {last_order['amount']:.2f} TON\n"
+            f"🆔 Заявка №{last_order['id']}\n"
             f"⏳ Статус: Ожидает подтверждения",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -232,17 +242,15 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, user_id, tx_id = query.data.split("_")
         user_id = str(user_id)
 
-        order = context.user_data.get("pending_order")
-        if order and order["id"] == tx_id:
+        order = ORDERS.get(tx_id)
+        if order:
             order["status"] = "✅ Подтверждено"
-            context.user_data.setdefault("history", []).append(
+
+            USERS[user_id]["balance"] += order["stars"]
+            USERS[user_id]["history"].append(
                 f"⭐ {order['stars']} | {order['amount']:.2f} TON | ✅ Подтверждено"
             )
 
-            # начисляем звезды пользователю
-            USERS[user_id]["balance"] += order["stars"]
-
-            # начисляем реферальный бонус
             inviter = USERS[user_id].get("inviter")
             if inviter and inviter in USERS:
                 bonus = order["stars"] * REF_PERCENT
@@ -250,37 +258,34 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 USERS[inviter]["ref_earned"] += bonus
                 await context.bot.send_message(
                     int(inviter),
-                    f"🎁 Ваш реферал совершил покупку!\n"
-                    f"💎 Вам начислено {bonus:.2f} ⭐"
+                    f"🎁 Ваш реферал совершил покупку!\n💎 Вам начислено {bonus:.2f} ⭐"
                 )
 
             save_users()
 
             await context.bot.send_message(
                 int(user_id),
-                f"✅ Оплата подтверждена!\n"
-                f"⭐ Вам начислено {order['stars']} звёзд.\n"
-                f"🆔 Заявка №{order['id']}"
+                f"✅ Оплата подтверждена!\n⭐ Вам начислено {order['stars']} звёзд.\n🆔 Заявка №{order['id']}"
             )
-            await query.message.reply_text("✅ Оплата подтверждена.")
+            await query.edit_message_text("✅ Оплата подтверждена.")
 
     elif query.data.startswith("reject_"):
         _, user_id, tx_id = query.data.split("_")
         user_id = str(user_id)
 
-        order = context.user_data.get("pending_order")
-        if order and order["id"] == tx_id:
+        order = ORDERS.get(tx_id)
+        if order:
             order["status"] = "❌ Отклонено"
-            context.user_data.setdefault("history", []).append(
+            USERS[user_id]["history"].append(
                 f"⭐ {order['stars']} | {order['amount']:.2f} TON | ❌ Отклонено"
             )
+            save_users()
 
             await context.bot.send_message(
                 int(user_id),
-                f"❌ Оплата отклонена.\n"
-                f"🆔 Заявка №{order['id']}"
+                f"❌ Оплата отклонена.\n🆔 Заявка №{order['id']}"
             )
-            await query.message.reply_text("❌ Оплата отклонена.")
+            await query.edit_message_text("❌ Оплата отклонена.")
 
 
 # === Команда /stats для админа ===
@@ -289,7 +294,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📊 Статистика:\n"
             f"👥 Пользователей: {len(USERS)}\n"
-            f"🛒 Заявок: {TOTAL_ORDERS}"
+            f"🛒 Заявок: {len(ORDERS)}"
         )
 
 
