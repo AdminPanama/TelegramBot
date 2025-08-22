@@ -25,8 +25,8 @@ if not CHANNEL_USERNAME:
     raise ValueError("❌ CHANNEL_USERNAME не задан в переменных окружения")
 
 ADMIN_ID = int(ADMIN_ID)
-# ====================
 
+# ====================
 PRICE_PER_STAR = 0.00475  # Цена за 1 звезду в TON
 MIN_STARS = 50
 MAX_STARS = 10000
@@ -34,6 +34,7 @@ REF_PERCENT = 0.01  # 1% бонуса пригласившему
 
 USERS = {}   # user_id: {...}
 ORDERS = {}  # order_id: {"user_id", "stars", "amount", "status"}
+
 DATA_FILE = "users.json"
 
 
@@ -45,6 +46,7 @@ def load_users():
             USERS = json.load(f)
     else:
         USERS = {}
+
 
 def save_users():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -74,14 +76,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "inviter": referrer if referrer and referrer != user_id else None,
             "history": []
         }
+
         if referrer and referrer in USERS:
             USERS[referrer]["referrals"].append(user_id)
+
         save_users()
 
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{CHANNEL_USERNAME}")],
         [InlineKeyboardButton("✅ Продолжить", callback_data="continue_menu")]
     ]
+
     await update.message.reply_text(
         f"👋 Добро пожаловать!\n\n"
         f"Чтобы пользоваться ботом, подпишитесь на наш канал 👉 @{CHANNEL_USERNAME}\n"
@@ -188,7 +193,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⭐ Кол-во звёзд: {stars}\n"
                 f"💎 Сумма: {amount_ton:.2f} TON\n\n"
                 f"🔗 Отправьте {amount_ton:.2f} TON на кошелёк:\n"
-                f"`{TON_WALLET}`\n\n"
+                f"{TON_WALLET}\n\n"
                 "📸 После перевода отправьте скриншот!"
             )
             await update.message.reply_text(text, parse_mode="Markdown")
@@ -201,9 +206,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
 
-    # ищем последнюю заявку пользователя
+    # берем последнюю заявку
     last_order = None
-    for o in ORDERS.values():
+    for o in reversed(list(ORDERS.values())):
         if str(o["user_id"]) == user_id and o["status"] == "Ожидает подтверждения":
             last_order = o
             break
@@ -216,14 +221,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
 
-        await context.bot.send_message(
+        # теперь пересылаем скриншот админу
+        photo_file = update.message.photo[-1].file_id
+        await context.bot.send_photo(
             ADMIN_ID,
-            f"💰 Новая оплата!\n"
-            f"👤 Пользователь: @{update.message.from_user.username}\n"
-            f"⭐ Кол-во звёзд: {last_order['stars']}\n"
-            f"💎 Сумма: {last_order['amount']:.2f} TON\n"
-            f"🆔 Заявка №{last_order['id']}\n"
-            f"⏳ Статус: Ожидает подтверждения",
+            photo=photo_file,
+            caption=(
+                f"💰 Новая оплата!\n"
+                f"👤 Пользователь: @{update.message.from_user.username}\n"
+                f"⭐ Кол-во звёзд: {last_order['stars']}\n"
+                f"💎 Сумма: {last_order['amount']:.2f} TON\n"
+                f"🆔 Заявка №{last_order['id']}\n"
+                f"⏳ Статус: Ожидает подтверждения"
+            ),
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -240,12 +250,11 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("confirm_"):
         _, user_id, tx_id = query.data.split("_")
         user_id = str(user_id)
-
         order = ORDERS.get(tx_id)
+
         if order:
             order["status"] = "✅ Подтверждено"
 
-            # Создаем запись для нового юзера, если его ещё нет
             if user_id not in USERS:
                 USERS[user_id] = {
                     "username": "",
@@ -264,21 +273,18 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 int(user_id),
                 "✅ Ваша заявка успешно принята и обработана!\n\n"
-                "Спасибо за покупку, ожидайте поступления звёзд ✨\n"
-                "Звёзды придут в течение 15 минут.\n"
-                "Если задержка больше 2 часов — обратитесь в администрацию."
+                "Спасибо за покупку, ожидайте поступления звёзд ✨"
             )
             await query.edit_message_text("✅ Оплата подтверждена (без автопополнения).")
 
     elif query.data.startswith("reject_"):
         _, user_id, tx_id = query.data.split("_")
         user_id = str(user_id)
-
         order = ORDERS.get(tx_id)
+
         if order:
             order["status"] = "❌ Отклонено"
 
-            # Создаем запись для нового юзера, если его ещё нет
             if user_id not in USERS:
                 USERS[user_id] = {
                     "username": "",
@@ -301,6 +307,36 @@ async def admin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Оплата отклонена.")
 
 
+# === Команда /addstars для админа ===
+async def add_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        user_id = str(context.args[0])
+        stars = int(context.args[1])
+
+        if user_id not in USERS:
+            USERS[user_id] = {
+                "username": "",
+                "balance": 0,
+                "referrals": [],
+                "ref_earned": 0,
+                "inviter": None,
+                "history": []
+            }
+
+        USERS[user_id]["balance"] += stars
+        USERS[user_id]["history"].append(f"🎁 Админ начислил {stars} ⭐")
+        save_users()
+
+        await update.message.reply_text(f"✅ Пользователю {user_id} начислено {stars} ⭐")
+        await context.bot.send_message(int(user_id), f"🎁 Вам начислено {stars} ⭐ от администратора!")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 # === Команда /stats для админа ===
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id == ADMIN_ID:
@@ -318,13 +354,11 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("addstars", add_stars))
+
     app.add_handler(CallbackQueryHandler(admin_handler, pattern="^(confirm_|reject_)"))
     app.add_handler(CallbackQueryHandler(menu_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
